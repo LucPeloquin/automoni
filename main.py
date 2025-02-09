@@ -8,16 +8,13 @@ from selenium.webdriver.chrome.service import Service  # For setting up ChromeDr
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager  # Automatically manages ChromeDriver
 
 # --- Pushover API Credentials ---
 PUSHOVER_USER_KEY = "ukayvywh7zjxg5s2jfrndmqix61prs"
 PUSHOVER_API_TOKEN = "ayods1kowznws72y24ta547owk18br"
 
 def send_push_notification(title, message):
-    """
-    Sends a push notification using the Pushover API.
-    """
+
     data = {
         "token": PUSHOVER_API_TOKEN,
         "user": PUSHOVER_USER_KEY,
@@ -32,63 +29,62 @@ def send_push_notification(title, message):
         print("Failed to send notification:", e)
 
 def fetch_listing_count(url):
-    """
-    Uses Selenium to fetch the webpage and extract the numeric listing count from the element:
-    
-      <div class="-listing-count">
-          <div class="-header">
-              <span>7 Listings</span>
-          </div>
-      </div>
-      
-    Returns the listing count as an integer or None if not found.
-    """
+
     options = Options()
-    
-    # For debugging, try running without headless mode:
+    # Run headless (uncomment the next line to run headless)
     # options.add_argument("--headless")
-    
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
-    # Set a user agent to mimic a regular browser
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36")
     
-    # Set up ChromeDriver with webdriver_manager so it uses the correct driver version
-    service = Service(ChromeDriverManager().install())
+    # Hard-code the path to your chromedriver.exe (adjust if needed)
+    chromedriver_path = "chromedriver.exe"
+    
+    # Initialize the Service using the hard-coded chromedriver.exe path
+    service = Service(executable_path=chromedriver_path)
+    
+    # Initialize the Chrome driver with the service and options
     driver = webdriver.Chrome(service=service, options=options)
     
     try:
         driver.get(url)
-        # Increase the wait time to ensure the element loads
+        # Wait up to 20 seconds for the element to be present
         wait = WebDriverWait(driver, 20)
-        # Wait for the <span> inside the listing count element to be present
-        element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.-listing-count span")))
+        time.sleep(3)
+        stats_element = wait.until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "div.ais-Panel.-stats"))
+        )
         
-        # Get the text directly from the element
-        text = element.text
-        print(f"Found text: '{text}' on {url}")
+        # Get the full text from the element (e.g., "123 results found")
+        full_text = stats_element.text
+        print("Full text from the ais-Panel -stats element:", full_text)
         
-        # Extract the first group of digits from the text (e.g., "7" from "7 Listings")
-        match = re.search(r'(\d+)', text)
+        # Extract the number and label using regex.
+        # For example, if the text is "123 results", this will extract 123 and "results".
+        match = re.match(r"(\d+)\s+(\w+)", full_text)
         if match:
-            count = int(match.group(1))
-            return count
+            number = int(match.group(1))
+            label = match.group(2)
+            print("Extracted number:", number)
+            # print("Extracted label:", label)
+            return number
         else:
-            print(f"Warning: Could not extract a number from the text '{text}' at {url}.")
-            return None
+        # Attempt to match a number with commas (e.g., "1,652,234 listings")
+            match = re.match(r"([\d,]+)\s+(\w+)", full_text)
+            number_str = match.group(1).replace(',', '')
+            number = int(number_str)
+            label = match.group(2)
+            print("Extracted number (with commas removed):", number)
+            # print("Extracted label:", label)
+            return number
+
     except Exception as e:
-        print(f"Error using Selenium to fetch {url}: {e}")
-        return None
+        print("Error using Selenium:", e)
+            
     finally:
         driver.quit()
 
 def check_listing_count_update(url, last_count):
-    """
-    Checks the listing count for the given URL.
-    
-    Returns a tuple (current_count, update_detected). On the first run (when last_count is None),
-    the current count is stored but no notification is sent.
-    """
+
     try:
         current_count = fetch_listing_count(url)
         if current_count is None:
@@ -111,8 +107,12 @@ def main():
     # --- List of webpages to monitor ---
     urls = [
         "https://www.grailed.com/shop/nxzCtqQtfg",
+        "https://www.grailed.com/shop/lRwSEkgxZw",
+        "https://www.grailed.com/shop/PweX949iwA",
         # Add more URLs as needed.
     ]
+
+
 
     # Dictionary to store the last known listing count for each URL.
     last_counts = {url: None for url in urls}
@@ -131,7 +131,7 @@ def main():
             last_counts[url] = new_count
         
         # Wait for 60 seconds before checking again.
-        time.sleep(60)
+        time.sleep(600)
 
 if __name__ == "__main__":
     main()
