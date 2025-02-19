@@ -103,7 +103,7 @@ def check_listing_count_update(url, last_count):
         # First run: initialize with the current count.
         return current_count, False
 
-      if current_count != last_count:
+      if current_count > last_count:
         return current_count, True
       else:
         return current_count, False
