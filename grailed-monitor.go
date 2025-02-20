@@ -13,39 +13,30 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
-// PushoverCredentials stores API credentials for Pushover
-type PushoverCredentials struct {
-	UserKey   string
-	APIToken  string
-}
-
-// Constants for Pushover API
+// Constants for ntfy
 const (
-	pushoverUserKey = "ukayvywh7zjxg5s2jfrndmqix61prs"
-	pushoverAPIToken = "ayods1kowznws72y24ta547owk18br"
-	pushoverAPI = "https://api.pushover.net/1/messages.json"
+	ntfyTopic  = "automonitor"     // Replace with your desired topic
+	ntfyServer = "https://ntfy.sh" // You can use the public server or your self-hosted instance
 )
 
-// sendPushNotification sends a push notification using the Pushover API
-func sendPushNotification(title, message string) error {
-	data := http.Client{}
-	
-	form := strings.NewReader(fmt.Sprintf(
-		"token=%s&user=%s&title=%s&message=%s",
-		pushoverAPIToken,
-		pushoverUserKey,
-		title,
-		message,
-	))
+// PushoverCredentials stores API credentials for Pushover
+type PushoverCredentials struct {
+	UserKey  string
+	APIToken string
+}
 
-	req, err := http.NewRequest("POST", pushoverAPI, form)
+// sendPushNotification sends a push notification using ntfy
+func sendPushNotification(title, message string) error {
+	url := fmt.Sprintf("%s/%s", ntfyServer, ntfyTopic)
+
+	req, err := http.NewRequest("POST", url, strings.NewReader(message))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %v", err)
 	}
 
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Title", title)
 
-	resp, err := data.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to send notification: %v", err)
 	}
@@ -59,8 +50,8 @@ func sendPushNotification(title, message string) error {
 	return nil
 }
 
-// fetchListingCount retrieves the listing count from the specified URL
-func fetchListingCount(url string) (int, error) {
+// fetchListingCount retrieves the listing count and search term from the specified URL
+func fetchListingCount(url string) (int, string, error) {
 	// Create context
 	ctx, cancel := chromedp.NewContext(context.Background())
 	defer cancel()
@@ -86,54 +77,58 @@ func fetchListingCount(url string) (int, error) {
 	ctx, cancel = chromedp.NewContext(allocCtx)
 	defer cancel()
 
-	var statsText string
+	var statsText, searchTerm, refinements string
 	err := chromedp.Run(ctx,
 		chromedp.Navigate(url),
 		chromedp.Sleep(3*time.Second),
 		chromedp.Text("div.ais-Panel.-stats", &statsText, chromedp.NodeVisible, chromedp.ByQuery),
+		chromedp.Text(`h1[data-testid="Title"]`, &searchTerm, chromedp.NodeVisible, chromedp.ByQuery),
+		chromedp.Evaluate(`Array.from(document.querySelectorAll('ul.-current-refinements span.-refinement-label')).map(el => el.textContent).join(', ')`, &refinements),
 	)
 
 	if err != nil {
-		return 0, fmt.Errorf("failed to fetch page: %v", err)
+		return 0, "", fmt.Errorf("failed to fetch page: %v", err)
 	}
 
 	if statsText == "" {
-		return 0, fmt.Errorf("empty stats text received")
+		return 0, "", fmt.Errorf("empty stats text received")
 	}
 
-	log.Printf("Full text from the ais-Panel -stats element: %s", statsText)
+	// log.Printf("Full text from the ais-Panel -stats element: %s", statsText)
+	// log.Printf("Extracted search term: %s, refinements: %s", searchTerm, refinements)
 
 	// Try to extract number using regex
 	re := regexp.MustCompile(`(\d+(?:,\d+)?)\s+(\w+)`)
 	matches := re.FindStringSubmatch(statsText)
 
 	if len(matches) < 2 {
-		return 0, fmt.Errorf("could not extract number from text: '%s'", statsText)
+		return 0, "", fmt.Errorf("could not extract number from text: '%s'", statsText)
 	}
 
 	// Remove commas and convert to integer
 	numberStr := strings.ReplaceAll(matches[1], ",", "")
 	number, err := strconv.Atoi(numberStr)
 	if err != nil {
-		return 0, fmt.Errorf("error converting '%s' to integer: %v", numberStr, err)
+		return 0, "", fmt.Errorf("error converting '%s' to integer: %v", numberStr, err)
 	}
 
-	log.Printf("Extracted number: %d", number)
-	return number, nil
+	log.Printf("Listing cnt: %d, search term: %s, refinements: %s", number, searchTerm, refinements)
+	fullSearchTerm := fmt.Sprintf("%s (%s)", searchTerm, refinements)
+	return number, fullSearchTerm, nil
 }
 
 // checkListingCountUpdate checks if the listing count has been updated
-func checkListingCountUpdate(url string, lastCount *int) (int, bool, error) {
-	currentCount, err := fetchListingCount(url)
+func checkListingCountUpdate(url string, lastCount *int) (int, string, bool, error) {
+	currentCount, fullSearchTerm, err := fetchListingCount(url)
 	if err != nil {
-		return 0, false, err
+		return *lastCount, "", false, err // Return existing count on error
 	}
 
 	if lastCount == nil {
-		return currentCount, false, nil
+		return currentCount, fullSearchTerm, false, nil
 	}
 
-	return currentCount, currentCount > *lastCount, nil
+	return currentCount, fullSearchTerm, currentCount > *lastCount, nil
 }
 
 func main() {
@@ -142,6 +137,7 @@ func main() {
 		"https://www.grailed.com/shop/nxzCtqQtfg",
 		"https://www.grailed.com/shop/lRwSEkgxZw",
 		"https://www.grailed.com/shop/PweX949iwA",
+		"https://www.grailed.com/shop/z5RvSYTnZQ",
 	}
 
 	// Map to store the last known listing count for each URL
@@ -154,17 +150,17 @@ func main() {
 
 	for {
 		for _, url := range urls {
-			newCount, updated, err := checkListingCountUpdate(url, lastCounts[url])
+			newCount, fullSearchTerm, updated, err := checkListingCountUpdate(url, lastCounts[url])
 			if err != nil {
 				log.Printf("Error checking listing count for %s: %v", url, err)
 				continue
 			}
 
 			if updated {
-				log.Printf("Listing count updated for %s: %d -> %d", url, *lastCounts[url], newCount)
+				log.Printf("Listing count updated for %s (%s): %d -> %d", url, fullSearchTerm, *lastCounts[url], newCount)
 				err := sendPushNotification(
 					"Listing Count Update",
-					fmt.Sprintf("Listings changed from %d to %d at %s", *lastCounts[url], newCount, url),
+					fmt.Sprintf("Listings changed from %d to %d at %s (%s)", *lastCounts[url], newCount, url, fullSearchTerm),
 				)
 				if err != nil {
 					log.Printf("Failed to send notification: %v", err)
