@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "*.go",
+      "use": "@vercel/go"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/check",
+      "dest": "/grailed-monitor.go"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/check",
+      "schedule": "*/10 * * * *"
+    }
+  ]
+} 

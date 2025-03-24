@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -23,6 +25,23 @@ const (
 type PushoverCredentials struct {
 	UserKey  string
 	APIToken string
+}
+
+// Response represents the API response structure
+type Response struct {
+	Status    string   `json:"status"`
+	Message   string   `json:"message"`
+	Timestamp string   `json:"timestamp"`
+	Updates   []Update `json:"updates,omitempty"`
+}
+
+// Update represents a change in listings
+type Update struct {
+	URL           string `json:"url"`
+	SearchTerm    string `json:"searchTerm"`
+	CurrentCount  int    `json:"currentCount"`
+	PreviousCount int    `json:"previousCount,omitempty"`
+	Changed       bool   `json:"changed"`
 }
 
 // sendPushNotification sends a push notification using ntfy
@@ -52,12 +71,8 @@ func sendPushNotification(title, message string) error {
 
 // fetchListingCount retrieves the listing count and search term from the specified URL
 func fetchListingCount(url string) (int, string, error) {
-	// Create context
-	ctx, cancel := chromedp.NewContext(context.Background())
-	defer cancel()
-
 	// Add timeout to context
-	ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	// Configure Chrome
@@ -74,6 +89,7 @@ func fetchListingCount(url string) (int, string, error) {
 	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
 	defer cancel()
 
+	// Create context
 	ctx, cancel = chromedp.NewContext(allocCtx)
 	defer cancel()
 
@@ -131,8 +147,49 @@ func checkListingCountUpdate(url string, lastCount *int) (int, string, bool, err
 	return currentCount, fullSearchTerm, currentCount > *lastCount, nil
 }
 
-func main() {
-	// List of URLs to monitor
+// Handler handles HTTP requests for Vercel
+func Handler(w http.ResponseWriter, r *http.Request) {
+	// Only allow GET requests
+	if r.Method != http.MethodGet {
+		sendJSONResponse(w, http.StatusMethodNotAllowed, Response{
+			Status:    "error",
+			Message:   "Method not allowed",
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		})
+		return
+	}
+
+	// Check for authorization header
+	apiKey := r.Header.Get("X-API-Key")
+	if apiKey != os.Getenv("API_KEY") {
+		sendJSONResponse(w, http.StatusUnauthorized, Response{
+			Status:    "error",
+			Message:   "Unauthorized",
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		})
+		return
+	}
+
+	updates, err := checkAllListings()
+	if err != nil {
+		sendJSONResponse(w, http.StatusInternalServerError, Response{
+			Status:    "error",
+			Message:   err.Error(),
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		})
+		return
+	}
+
+	sendJSONResponse(w, http.StatusOK, Response{
+		Status:    "success",
+		Message:   "Listings checked successfully",
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Updates:   updates,
+	})
+}
+
+// checkAllListings checks all URLs and returns updates
+func checkAllListings() ([]Update, error) {
 	urls := []string{
 		"https://www.grailed.com/shop/nxzCtqQtfg",
 		"https://www.grailed.com/shop/lRwSEkgxZw",
@@ -140,39 +197,83 @@ func main() {
 		"https://www.grailed.com/shop/z5RvSYTnZQ",
 	}
 
-	// Map to store the last known listing count for each URL
-	lastCounts := make(map[string]*int)
+	var updates []Update
 	for _, url := range urls {
-		lastCounts[url] = nil
-	}
-
-	log.Println("Starting the monitoring process. Press Ctrl+C to exit.")
-
-	for {
-		for _, url := range urls {
-			newCount, fullSearchTerm, updated, err := checkListingCountUpdate(url, lastCounts[url])
-			if err != nil {
-				log.Printf("Error checking listing count for %s: %v", url, err)
-				continue
-			}
-
-			if updated {
-				log.Printf("Listing count updated for %s (%s): %d -> %d", url, fullSearchTerm, *lastCounts[url], newCount)
-				err := sendPushNotification(
-					"Listing Count Update",
-					fmt.Sprintf("Listings changed from %d to %d at %s (%s)", *lastCounts[url], newCount, url, fullSearchTerm),
-				)
-				if err != nil {
-					log.Printf("Failed to send notification: %v", err)
-				}
-			}
-
-			// Update the stored count
-			count := newCount // Create a new variable to store the address
-			lastCounts[url] = &count
+		currentCount, searchTerm, err := fetchListingCount(url)
+		if err != nil {
+			log.Printf("Error checking %s: %v", url, err)
+			continue
 		}
 
-		// Wait before next check
-		time.Sleep(600 * time.Second)
+		// Get previous count from database (implementation needed)
+		previousCount, err := getPreviousCount(url)
+		if err != nil {
+			log.Printf("Error getting previous count for %s: %v", url, err)
+		}
+
+		update := Update{
+			URL:          url,
+			SearchTerm:   searchTerm,
+			CurrentCount: currentCount,
+			Changed:      previousCount != nil && currentCount != *previousCount,
+		}
+
+		if previousCount != nil {
+			update.PreviousCount = *previousCount
+		}
+
+		// Store new count in database (implementation needed)
+		if err := storeCount(url, currentCount); err != nil {
+			log.Printf("Error storing count for %s: %v", url, err)
+		}
+
+		// Send notification if count changed
+		if update.Changed {
+			err := sendPushNotification(
+				"Listing Count Update",
+				fmt.Sprintf("Listings changed from %d to %d at %s (%s)",
+					update.PreviousCount, update.CurrentCount, url, searchTerm),
+			)
+			if err != nil {
+				log.Printf("Failed to send notification: %v", err)
+			}
+		}
+
+		updates = append(updates, update)
 	}
+
+	return updates, nil
+}
+
+// sendJSONResponse sends a JSON response with the given status code
+func sendJSONResponse(w http.ResponseWriter, status int, payload interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(payload)
+}
+
+// Database interface functions (to be implemented)
+func getPreviousCount(url string) (*int, error) {
+	// TODO: Implement database retrieval
+	return nil, nil
+}
+
+func storeCount(url string, count int) error {
+	// TODO: Implement database storage
+	return nil
+}
+
+func main() {
+	// Set up HTTP handler
+	http.HandleFunc("/api/check", Handler)
+
+	// Get port from environment variable or use default
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	// Start the server
+	log.Printf("Server starting on :%s", port)
+	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
